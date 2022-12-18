@@ -11,9 +11,11 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/logank/ampache"
 	"github.com/logank/itunes2ampache/internal/itunes"
+	pb "github.com/schollz/progressbar/v3"
 )
 
 var (
@@ -48,6 +50,13 @@ type track struct {
 
 	ampacheId     int
 	ampacheRating ampacheRating
+}
+
+// PbWithOptions applies options to a progressbar. I like the default, but the
+// saucer is something that doesn't render well in my terminal.
+func PbWithOptions(p *pb.ProgressBar) *pb.ProgressBar {
+	pb.OptionSetTheme(pb.Theme{Saucer: "=", SaucerPadding: " ", BarStart: "[", BarEnd: "]"})(p)
+	return p
 }
 
 func main() {
@@ -110,16 +119,25 @@ func main() {
 			log.Fatalf("Failed to create Ampache client: %s", err)
 		}
 		c.WithAuthPassword(ampacheUser, ampachePass)
-		c.Verbose = 1
+
+		if v, found := os.LookupEnv("AMPACHE_VERBOSE"); found {
+			if vi, err := strconv.Atoi(v); err == nil {
+				c.Verbose = vi
+			}
+		}
 
 		offset := 0
 		trackCount := 0
+		var bar *pb.ProgressBar
 		for {
 			songs, err := c.Songs(map[string]string{"limit": "2000", "offset": strconv.Itoa(offset)})
 			if err != nil {
 				log.Fatalf("Failed fetching Ampache songs: %s", err)
 			}
 
+			if bar == nil {
+				bar = PbWithOptions(pb.Default(int64(songs.TotalCount), "fetching"))
+			}
 			for _, s := range songs.Songs {
 				if !strings.HasPrefix(s.Filename, ampacheRoot) {
 					log.Printf("Warning: Unusual Ampache location: %s `%s`", s.Title, s.Filename)
@@ -142,10 +160,12 @@ func main() {
 			}
 
 			if len(songs.Songs) == 0 {
+				bar.Finish()
 				break
 			}
 
 			offset += len(songs.Songs)
+			bar.Set(offset)
 		}
 
 		log.Printf("Ampache: track count %d\n", trackCount)
@@ -161,37 +181,38 @@ func main() {
 	}
 	fmt.Println("")
 
-	fmt.Println("== Missing Ratings ==")
+	fmt.Println("== Mismatched Ratings ==")
+	var mismatchCount int64 = 0
 	for k, v := range tracks {
 		if v.itunesId != 0 && v.itunesRating.Equal(v.ampacheRating) {
 			continue
 		}
 
 		fmt.Printf("%s\n\titunes(%d=%d)\tampache(%d)\n", k, v.itunesRating, v.itunesRating.AsAmpacheRating(), v.ampacheRating)
+		mismatchCount++
 	}
 	fmt.Println("")
 
 	if c != nil && !dryRun {
-		fmt.Println("== Copy Ratings To Ampache ==")
+		fmt.Printf("== Copy %d Ratings To Ampache ==\n", mismatchCount)
 		// Pause to give the user a chance to quit.
 		time.Sleep(400 * time.Millisecond)
 
-		for k, v := range tracks {
+		bar := PbWithOptions(pb.Default(mismatchCount, "set rating"))
+		for _, v := range tracks {
 			if v.itunesId != 0 && v.itunesRating.Equal(v.ampacheRating) {
 				continue
 			}
 
-			if c != nil && !dryRun {
-				msg, err := c.Rate(ampache.MediaSong, v.ampacheId, int(v.itunesRating.AsAmpacheRating()))
-				if err != nil {
-					skip++
-					if *skipCount > 0 && skip > *skipCount {
-						log.Fatalf("Too many skipped tracks. Failing out...")
-					}
+			_, err := c.Rate(ampache.MediaSong, v.ampacheId, int(v.itunesRating.AsAmpacheRating()))
+			bar.Add(1)
+			if err != nil {
+				skip++
+				if *skipCount > 0 && skip > *skipCount {
+					log.Fatalf("Too many skipped tracks. Failing out...")
 				}
 			}
-
 		}
+		bar.Finish()
 	}
-
 }
