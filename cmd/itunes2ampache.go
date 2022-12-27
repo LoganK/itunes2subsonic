@@ -6,6 +6,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/url"
 	"os"
@@ -23,6 +24,7 @@ var (
 	itunesXml   = flag.String("itunes_xml", "", "path to the itunes XML to import")
 	skipCount   = flag.Int("skip_count", 10, "a limit on the number of tracks that would be skipped before refusing to process")
 	ampacheUrl  = flag.String("ampache", "", "url of the Ampache instance")
+	playFile    = flag.String("play_file", "", "a file to write Ampache SQL statements to update Last Played")
 	itunesRoot  = `file://localhost/M:/Music`
 	ampacheRoot = `/media`
 )
@@ -45,8 +47,9 @@ func (r itunesRating) Equal(ar ampacheRating) bool {
 type ampacheRating int
 
 type track struct {
-	itunesId     int
-	itunesRating itunesRating
+	itunesId       int
+	itunesRating   itunesRating
+	itunesPlayDate time.Time
 
 	ampacheId     int
 	ampacheRating ampacheRating
@@ -57,6 +60,20 @@ type track struct {
 func PbWithOptions(p *pb.ProgressBar) *pb.ProgressBar {
 	pb.OptionSetTheme(pb.Theme{Saucer: "=", SaucerPadding: " ", BarStart: "[", BarEnd: "]"})(p)
 	return p
+}
+
+func writePlayedSql(f io.Writer, tracks map[string]*track) error {
+	fmt.Fprint(f, "# SET @USER_ID := 2;\n")
+	for _, v := range tracks {
+		if v.itunesPlayDate.IsZero() || v.ampacheId == 0 {
+			continue
+		}
+
+		fmt.Fprintf(f, "INSERT INTO user_activity (user, action, object_type, object_id, activity_date) VALUES (@USER_ID, 'play', 'song', %d, %d);\n", v.ampacheId, v.itunesPlayDate.Unix())
+		fmt.Fprintf(f, "INSERT INTO object_count (user, count_type, object_type, object_id, date, agent) VALUES (@USER_ID, 'stream', 'song', %d, %d, 'itunes2ampache');\n", v.ampacheId, v.itunesPlayDate.Unix())
+	}
+
+	return nil
 }
 
 func main() {
@@ -106,6 +123,7 @@ func main() {
 			}
 			t.itunesId = v.TrackId
 			t.itunesRating = itunesRating(v.Rating)
+			t.itunesPlayDate = v.PlayDateUTC
 		}
 
 		log.Printf("iTunes: track count: %d\n", trackCount)
@@ -130,7 +148,7 @@ func main() {
 		trackCount := 0
 		var bar *pb.ProgressBar
 		for {
-			songs, err := c.Songs(map[string]string{"limit": "2000", "offset": strconv.Itoa(offset)})
+			songs, err := c.Songs(map[string]string{"limit": "400", "offset": strconv.Itoa(offset)})
 			if err != nil {
 				log.Fatalf("Failed fetching Ampache songs: %s", err)
 			}
@@ -184,7 +202,7 @@ func main() {
 	fmt.Println("== Mismatched Ratings ==")
 	var mismatchCount int64 = 0
 	for k, v := range tracks {
-		if v.itunesId != 0 && v.itunesRating.Equal(v.ampacheRating) {
+		if (v.itunesId == 0 || v.ampacheId == 0) || v.itunesRating.Equal(v.ampacheRating) {
 			continue
 		}
 
@@ -199,14 +217,15 @@ func main() {
 		time.Sleep(400 * time.Millisecond)
 
 		bar := PbWithOptions(pb.Default(mismatchCount, "set rating"))
-		for _, v := range tracks {
-			if v.itunesId != 0 && v.itunesRating.Equal(v.ampacheRating) {
+		for k, v := range tracks {
+			if (v.itunesId == 0 || v.ampacheId == 0) || v.itunesRating.Equal(v.ampacheRating) {
 				continue
 			}
 
 			_, err := c.Rate(ampache.MediaSong, v.ampacheId, int(v.itunesRating.AsAmpacheRating()))
 			bar.Add(1)
 			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error seting rating for '%s': %s\n", k, err)
 				skip++
 				if *skipCount > 0 && skip > *skipCount {
 					log.Fatalf("Too many skipped tracks. Failing out...")
@@ -214,5 +233,18 @@ func main() {
 			}
 		}
 		bar.Finish()
+	}
+
+	if *playFile != "" && c != nil {
+		f, err := os.OpenFile(*playFile, os.O_RDWR|os.O_CREATE, 0644)
+		if err != nil {
+			log.Fatalf("Failed to open given play file: %s", err)
+		}
+		defer f.Close()
+
+		err = writePlayedSql(f, tracks)
+		if err != nil {
+			log.Fatalf("Failed to write play file: %s", err)
+		}
 	}
 }
