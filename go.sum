@@ -1,5 +1,7 @@
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
+github.com/delucks/go-subsonic v0.0.0-20220915164742-2744002c4be5 h1:RuuxidatioSKGOiBzL1mTY4X22DQD8weEbS3iRLHnAg=
+github.com/delucks/go-subsonic v0.0.0-20220915164742-2744002c4be5/go.mod h1:vnbEuj6Z20PLcHB4rrLQAOXGMjtULfMGhRVSFPcSdUo=
 github.com/jessevdk/go-flags v1.4.0/go.mod h1:4FA24M0QyGHXBuZZK/XkWh8h0e1EYbRYJSGM75WSRxI=
 github.com/k0kubun/go-ansi v0.0.0-20180517002512-3bf9e2903213/go.mod h1:vNUNkEQ1e29fT/6vq2aBdFsgNPmy8qMdSay1npru+Sw=
 github.com/logank/ampache v0.0.0-20221218080849-e61f0d2acc1d h1:dmdpfBR9ZuQLDmEiaBtKYS8XFDK9UVDIzjDJHT+eIK4=
