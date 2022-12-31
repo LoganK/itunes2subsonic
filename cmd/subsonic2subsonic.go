@@ -24,6 +24,7 @@ import (
 var (
 	dryRun          = flag.Bool("dry_run", true, "don't modify the library")
 	skipCount       = flag.Int("skip_count", 10, "a limit on the number of tracks that would be skipped before refusing to process")
+	copyUnrated     = flag.Bool("copy_unrated", false, "if true, will unset rating if src is unrated")
 	subsonicSrcUrl  = flag.String("subsonic_src", "", "url of the Subsonic instance to read")
 	subsonicDstUrl  = flag.String("subsonic_dst", "", "url of the Subsonic instance to write to")
 	subsonicSrcRoot = flag.String("subsonic_src_root", "", "(optional) the music library prefix on the read instance")
@@ -155,7 +156,7 @@ func main() {
 
 	byPath := make(map[string]*songPair)
 	for _, s := range srcSongs {
-		p := strings.ToLower(strings.TrimPrefix(s.Path(), *subsonicSrcRoot))
+		p := strings.TrimPrefix(strings.ToLower(s.Path()), *subsonicSrcRoot)
 		t, ok := byPath[p]
 		if !ok {
 			t = &songPair{}
@@ -164,7 +165,7 @@ func main() {
 		t.src = s
 	}
 	for _, s := range dstSongs {
-		p := strings.ToLower(strings.TrimPrefix(s.Path(), *subsonicDstRoot))
+		p := strings.TrimPrefix(strings.ToLower(s.Path()), *subsonicDstRoot)
 		t, ok := byPath[p]
 		if !ok {
 			t = &songPair{}
@@ -199,6 +200,9 @@ func main() {
 		if v.src.Id() == "" || v.dst.Id() == "" || v.src.FiveStarRating() == v.dst.FiveStarRating() {
 			continue
 		}
+		if v.src.FiveStarRating() == 0 && !*copyUnrated {
+			continue
+		}
 
 		fmt.Printf("%s\n\trating src(%d)\tdst(%d)\n", k, v.src.FiveStarRating(), v.dst.FiveStarRating())
 		mismatchCount++
@@ -216,6 +220,9 @@ func main() {
 		bar := i2s.PbWithOptions(pb.Default(mismatchCount, "set rating"))
 		for k, v := range byPath {
 			if v.src.Id() == "" || v.dst.Id() == "" || v.src.FiveStarRating() == v.dst.FiveStarRating() {
+				continue
+			}
+			if v.src.FiveStarRating() == 0 && !*copyUnrated {
 				continue
 			}
 
