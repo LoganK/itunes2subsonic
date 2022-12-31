@@ -41,12 +41,12 @@ func (s subsonicInfo) Path() string        { return s.path }
 func (s subsonicInfo) FiveStarRating() int { return s.rating }
 
 type songPair struct {
-	src i2s.SongInfo
-	dst i2s.SongInfo
+	src subsonicInfo
+	dst subsonicInfo
 }
 
-func fetchSubsonicSongs(c *subsonic.Client, bar *pb.ProgressBar) ([]i2s.SongInfo, error) {
-	var tracks []i2s.SongInfo
+func fetchSubsonicSongs(c *subsonic.Client, bar *pb.ProgressBar) ([]subsonicInfo, error) {
+	var tracks []subsonicInfo
 
 	offset := 0
 	for {
@@ -77,7 +77,6 @@ func fetchSubsonicSongs(c *subsonic.Client, bar *pb.ProgressBar) ([]i2s.SongInfo
 	}
 
 	return tracks, nil
-
 }
 
 func main() {
@@ -121,7 +120,7 @@ func main() {
 		log.Fatalf("Failed to create Subsonic client: %s", err)
 	}
 
-	var srcSongs, dstSongs []i2s.SongInfo
+	var srcSongs, dstSongs []subsonicInfo
 	g, _ := errgroup.WithContext(ctx)
 	fetchBar := i2s.PbWithOptions(pb.Default(-1, "fetching subsonic data"))
 	g.Go(func() error {
@@ -142,7 +141,15 @@ func main() {
 	log.Printf("Subsonic Src track count %d, Dst track count %d\n", len(srcSongs), len(dstSongs))
 
 	if *subsonicSrcRoot == "" && *subsonicDstRoot == "" {
-		*subsonicSrcRoot, *subsonicDstRoot = i2s.LibraryPrefix(srcSongs, dstSongs)
+		s := make([]i2s.SongInfo, 0, len(srcSongs))
+		for _, si := range srcSongs {
+			s = append(s, si)
+		}
+		d := make([]i2s.SongInfo, 0, len(dstSongs))
+		for _, si := range dstSongs {
+			d = append(d, si)
+		}
+		*subsonicSrcRoot, *subsonicDstRoot = i2s.LibraryPrefix(s, d)
 	}
 	fmt.Printf("Music library root: src='%s' dst='%s'\n", *subsonicSrcRoot, *subsonicDstRoot)
 
@@ -151,7 +158,7 @@ func main() {
 		p := strings.ToLower(strings.TrimPrefix(s.Path(), *subsonicSrcRoot))
 		t, ok := byPath[p]
 		if !ok {
-			t = &songPair{dst: subsonicInfo{}}
+			t = &songPair{}
 			byPath[p] = t
 		}
 		t.src = s
@@ -160,7 +167,7 @@ func main() {
 		p := strings.ToLower(strings.TrimPrefix(s.Path(), *subsonicDstRoot))
 		t, ok := byPath[p]
 		if !ok {
-			t = &songPair{src: subsonicInfo{}}
+			t = &songPair{}
 			byPath[p] = t
 		}
 		t.dst = s
