@@ -167,14 +167,24 @@ func main() {
 	}
 
 	fmt.Println("== Missing Tracks ==")
+	missingCount := 0
 	for k, v := range byPath {
 		if v.src.Id() != "" && v.dst.Id() != "" {
 			continue
 		}
 
+		missingCount++
 		fmt.Printf("%s\n\tmissing src(%s)\tdst(%s)\n", k, v.src.Id(), v.dst.Id())
 	}
 	fmt.Println("")
+	fmt.Printf("== Missing Track Count %d / (%d + %d) ==\n", missingCount, len(srcSongs), len(dstSongs))
+
+	if 100*missingCount/(len(srcSongs)+len(dstSongs)) > 90 {
+		fmt.Printf(`Warning: Missing count is significant. Tips:
+* Verify that the libraries are configured for the same directory
+* Set --subsonic_src_root and --subsonic_dst_root to the correct values
+* In Navidrome Player Settings, configure "Report Real Path"\n`)
+	}
 
 	fmt.Println("== Mismatched Ratings ==")
 	var mismatchCount int64 = 0
