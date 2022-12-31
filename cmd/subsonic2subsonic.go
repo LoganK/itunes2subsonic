@@ -5,6 +5,7 @@ package main
 // -   Navidrome requires going into the Player settings and configuring "Report Real Path"
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -15,7 +16,9 @@ import (
 	"time"
 
 	"github.com/delucks/go-subsonic"
+	i2s "github.com/logank/itunes2subsonic"
 	pb "github.com/schollz/progressbar/v3"
+	"golang.org/x/sync/errgroup"
 )
 
 var (
@@ -23,205 +26,183 @@ var (
 	skipCount       = flag.Int("skip_count", 10, "a limit on the number of tracks that would be skipped before refusing to process")
 	subsonicSrcUrl  = flag.String("subsonic_src", "", "url of the Subsonic instance to read")
 	subsonicDstUrl  = flag.String("subsonic_dst", "", "url of the Subsonic instance to write to")
-	subsonicSrcRoot = flag.String("subsonic_src_root", "", "the music library prefix on the read instance")
-	subsonicDstRoot = flag.String("subsonic_dst_root", "/music/", "the music library prefix on the write instance")
+	subsonicSrcRoot = flag.String("subsonic_src_root", "", "(optional) the music library prefix on the read instance")
+	subsonicDstRoot = flag.String("subsonic_dst_root", "", "(optional) the music library prefix on the write instance")
 )
 
 type subsonicInfo struct {
 	id     string
+	path   string
 	rating int
 }
 
-type track struct {
-	src subsonicInfo
-	dst subsonicInfo
+func (s subsonicInfo) Id() string          { return s.id }
+func (s subsonicInfo) Path() string        { return s.path }
+func (s subsonicInfo) FiveStarRating() int { return s.rating }
+
+type songPair struct {
+	src i2s.SongInfo
+	dst i2s.SongInfo
 }
 
-// PbWithOptions applies options to a progressbar. I like the default, but the
-// saucer is something that doesn't render well in my terminal.
-func PbWithOptions(p *pb.ProgressBar) *pb.ProgressBar {
-	pb.OptionSetTheme(pb.Theme{Saucer: "=", SaucerPadding: " ", BarStart: "[", BarEnd: "]"})(p)
-	return p
+func fetchSubsonicSongs(c *subsonic.Client, bar *pb.ProgressBar) ([]i2s.SongInfo, error) {
+	var tracks []i2s.SongInfo
+
+	offset := 0
+	for {
+		songs, err := c.Search3(`""`, map[string]string{
+			"songCount":   "400",
+			"songOffset":  strconv.Itoa(offset),
+			"artistCount": "0",
+			"albumCount":  "0",
+		})
+		if err != nil {
+			log.Fatalf("Failed fetching Subsonic songs: %s", err)
+		}
+
+		for _, s := range songs.Song {
+			tracks = append(tracks, subsonicInfo{
+				id:     s.ID,
+				path:   s.Path,
+				rating: s.UserRating,
+			})
+		}
+
+		if len(songs.Song) == 0 {
+			break
+		}
+
+		offset += len(songs.Song)
+		bar.Add(len(songs.Song))
+	}
+
+	return tracks, nil
+
 }
 
 func main() {
+	ctx := context.Background()
+
 	flag.Parse()
 	subsonicSrcUser, subsonicSrcPass := os.Getenv("SUBSONIC_SRC_USER"), os.Getenv("SUBSONIC_SRC_PASS")
 	subsonicDstUser, subsonicDstPass := os.Getenv("SUBSONIC_USER"), os.Getenv("SUBSONIC_PASS")
 
-	if (subsonicSrcUser != "" || *subsonicSrcUrl != "") && subsonicSrcPass == "" {
-		log.Fatal("If reading from Subsonic, you must set the SUBSONIC_SRC_USER and SUBSONIC_SRC_PASS environment variables.")
-	}
-	if (subsonicDstUser != "" || *subsonicDstUrl != "") && subsonicDstPass == "" {
-		log.Fatal("If writing to Subsonic, you must set the SUBSONIC_USER and SUBSONIC_PASS environment variables.")
+	if *subsonicSrcUrl == "" || *subsonicDstUrl == "" {
+		log.Fatal("You must provide both --subsonic_src and --subsonic_dst")
 	}
 
-	// Map by file path.
-	tracks := make(map[string]*track)
-	skip := 0
-
-	var srcC *subsonic.Client
-	if *subsonicSrcUrl != "" {
-		srcC = &subsonic.Client{
-			Client:         &http.Client{},
-			BaseUrl:        *subsonicSrcUrl,
-			User:           subsonicSrcUser,
-			PasswordAuth:   true,
-			ClientName:     "subsonic2subsonic",
-			RequireDotView: true,
-		}
-		err := srcC.Authenticate(subsonicSrcPass)
-		if err != nil {
-			log.Fatalf("Failed to create Subsonic client: %s", err)
-		}
-
-		offset := 0
-		trackCount := 0
-		var bar *pb.ProgressBar
-		for {
-			songs, err := srcC.Search3(`""`, map[string]string{
-				"songCount":   "400",
-				"songOffset":  strconv.Itoa(offset),
-				"artistCount": "0",
-				"albumCount":  "0",
-			})
-			if err != nil {
-				log.Fatalf("Failed fetching Subsonic songs: %s", err)
-			}
-
-			if bar == nil {
-				bar = PbWithOptions(pb.Default(-1, "fetching src"))
-			}
-			for _, s := range songs.Song {
-				if !strings.HasPrefix(s.Path, *subsonicSrcRoot) {
-					log.Printf("Warning: Unusual Subsonic location: %s `%s`", s.Title, s.Path)
-					skip++
-					if *skipCount > 0 && skip > *skipCount {
-						log.Fatalf("Too many skipped tracks. Failing out...")
-					}
-					continue
-				}
-
-				trackCount++
-				loc := strings.ToLower(strings.TrimPrefix(s.Path, *subsonicSrcRoot))
-				t, ok := tracks[loc]
-				if !ok {
-					t = &track{}
-					tracks[loc] = t
-				}
-				t.src.id = s.ID
-				t.src.rating = s.UserRating
-			}
-
-			if len(songs.Song) == 0 {
-				bar.Finish()
-				break
-			}
-
-			offset += len(songs.Song)
-			bar.Set(offset)
-		}
-
-		log.Printf("Subsonic Src: track count %d\n", trackCount)
+	if subsonicSrcUser == "" || subsonicSrcPass == "" {
+		log.Fatal("You must set the SUBSONIC_SRC_USER and SUBSONIC_SRC_PASS environment variables.")
+	}
+	if subsonicDstUser == "" || subsonicDstPass == "" {
+		log.Fatal("You must set the SUBSONIC_USER and SUBSONIC_PASS environment variables.")
 	}
 
-	var dstC *subsonic.Client
-	if *subsonicDstUrl != "" {
-		dstC = &subsonic.Client{
-			Client:     &http.Client{},
-			BaseUrl:    *subsonicDstUrl,
-			User:       subsonicDstUser,
-			ClientName: "subsonic2subsonic",
+	srcC := &subsonic.Client{
+		Client:         &http.Client{},
+		BaseUrl:        *subsonicSrcUrl,
+		User:           subsonicSrcUser,
+		PasswordAuth:   true,
+		ClientName:     "subsonic2subsonic",
+		RequireDotView: true,
+	}
+	if err := srcC.Authenticate(subsonicSrcPass); err != nil {
+		log.Fatalf("Failed to create Subsonic client: %s", err)
+	}
+
+	dstC := &subsonic.Client{
+		Client:         &http.Client{},
+		BaseUrl:        *subsonicDstUrl,
+		User:           subsonicDstUser,
+		ClientName:     "subsonic2subsonic",
+		RequireDotView: true,
+	}
+	if err := dstC.Authenticate(subsonicDstPass); err != nil {
+		log.Fatalf("Failed to create Subsonic client: %s", err)
+	}
+
+	var srcSongs, dstSongs []i2s.SongInfo
+	g, _ := errgroup.WithContext(ctx)
+	fetchBar := i2s.PbWithOptions(pb.Default(-1, "fetching subsonic data"))
+	g.Go(func() error {
+		var err error
+		srcSongs, err = fetchSubsonicSongs(srcC, fetchBar)
+		return err
+	})
+	g.Go(func() error {
+		var err error
+		dstSongs, err = fetchSubsonicSongs(dstC, fetchBar)
+		return err
+	})
+	if err := g.Wait(); err != nil {
+		log.Fatalf("Failed while fetching Subsonic info: %s", err)
+	}
+	fetchBar.Finish()
+
+	log.Printf("Subsonic Src track count %d, Dst track count %d\n", len(srcSongs), len(dstSongs))
+
+	if *subsonicSrcRoot == "" && *subsonicDstRoot == "" {
+		*subsonicSrcRoot, *subsonicDstRoot = i2s.LibraryPrefix(srcSongs, dstSongs)
+	}
+	fmt.Printf("Music library root: src='%s' dst='%s'\n", *subsonicSrcRoot, *subsonicDstRoot)
+
+	byPath := make(map[string]*songPair)
+	for _, s := range srcSongs {
+		p := strings.ToLower(strings.TrimPrefix(s.Path(), *subsonicSrcRoot))
+		t, ok := byPath[p]
+		if !ok {
+			t = &songPair{dst: subsonicInfo{}}
+			byPath[p] = t
 		}
-		err := dstC.Authenticate(subsonicDstPass)
-		if err != nil {
-			log.Fatalf("Failed to create Subsonic client: %s", err)
+		t.src = s
+	}
+	for _, s := range dstSongs {
+		p := strings.ToLower(strings.TrimPrefix(s.Path(), *subsonicDstRoot))
+		t, ok := byPath[p]
+		if !ok {
+			t = &songPair{src: subsonicInfo{}}
+			byPath[p] = t
 		}
-
-		offset := 0
-		trackCount := 0
-		var bar *pb.ProgressBar
-		for {
-			songs, err := dstC.Search3(`""`, map[string]string{
-				"songCount":   "400",
-				"songOffset":  strconv.Itoa(offset),
-				"artistCount": "0",
-				"albumCount":  "0",
-			})
-			if err != nil {
-				log.Fatalf("Failed fetching Subsonic songs: %s", err)
-			}
-
-			if bar == nil {
-				bar = PbWithOptions(pb.Default(-1, "fetching dst"))
-			}
-			for _, s := range songs.Song {
-				if !strings.HasPrefix(s.Path, *subsonicDstRoot) {
-					log.Printf("Warning: Unusual Subsonic location: %s `%s`", s.Title, s.Path)
-					skip++
-					if *skipCount > 0 && skip > *skipCount {
-						log.Fatalf("Too many skipped tracks. Failing out...")
-					}
-					continue
-				}
-
-				trackCount++
-				loc := strings.ToLower(strings.TrimPrefix(s.Path, *subsonicDstRoot))
-				t, ok := tracks[loc]
-				if !ok {
-					t = &track{}
-					tracks[loc] = t
-				}
-				t.dst.id = s.ID
-				t.dst.rating = s.UserRating
-			}
-
-			if len(songs.Song) == 0 {
-				bar.Finish()
-				break
-			}
-
-			offset += len(songs.Song)
-			bar.Set(offset)
-		}
-
-		log.Printf("Subsonic Dst: track count %d\n", trackCount)
+		t.dst = s
 	}
 
 	fmt.Println("== Missing Tracks ==")
-	for k, v := range tracks {
-		if v.src.id != "" && v.dst.id != "" {
+	for k, v := range byPath {
+		if v.src.Id() != "" && v.dst.Id() != "" {
 			continue
 		}
 
-		fmt.Printf("%s\n\tsrc(%s)\tdst(%s)\n", k, v.src.id, v.dst.id)
+		fmt.Printf("%s\n\tmissing src(%s)\tdst(%s)\n", k, v.src.Id(), v.dst.Id())
 	}
 	fmt.Println("")
 
 	fmt.Println("== Mismatched Ratings ==")
 	var mismatchCount int64 = 0
-	for k, v := range tracks {
-		if (v.src.id == "" || v.dst.id == "") || v.src.rating == v.dst.rating {
+	for k, v := range byPath {
+		if v.src.Id() == "" || v.dst.Id() == "" || v.src.FiveStarRating() == v.dst.FiveStarRating() {
 			continue
 		}
 
-		fmt.Printf("%s\n\tsrc(%d)\tdst(%d)\n", k, v.src.rating, v.dst.rating)
+		fmt.Printf("%s\n\trating src(%d)\tdst(%d)\n", k, v.src.FiveStarRating(), v.dst.FiveStarRating())
 		mismatchCount++
 	}
 	fmt.Println("")
 
 	fmt.Printf("== Copy %d Ratings To Subsonic ==\n", mismatchCount)
-	if dstC != nil && !*dryRun {
+	if *dryRun {
+		fmt.Printf("Set --dry_run=false to modify %s", *subsonicDstUrl)
+	} else {
 		// Pause to give the user a chance to quit.
 		time.Sleep(400 * time.Millisecond)
 
-		bar := PbWithOptions(pb.Default(mismatchCount, "set rating"))
-		for k, v := range tracks {
-			if (v.src.id == "" || v.dst.id == "") || v.src.rating == v.dst.rating {
+		skip := 0
+		bar := i2s.PbWithOptions(pb.Default(mismatchCount, "set rating"))
+		for k, v := range byPath {
+			if v.src.Id() == "" || v.dst.Id() == "" || v.src.FiveStarRating() == v.dst.FiveStarRating() {
 				continue
 			}
 
-			err := dstC.SetRating(v.dst.id, v.src.rating)
+			err := dstC.SetRating(v.dst.Id(), v.src.FiveStarRating())
 			bar.Add(1)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Error setting rating for '%s': %s\n", k, err)
@@ -233,4 +214,5 @@ func main() {
 		}
 		bar.Finish()
 	}
+	fmt.Println("")
 }
